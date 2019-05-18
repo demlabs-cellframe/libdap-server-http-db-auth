@@ -7,12 +7,12 @@ add_definitions ("-D_GNU_SOURCE")
 set(CMAKE_C_FLAGS "-std=c11 -Wall -Wextra")
 
  
-find_package(PkgConfig)
-pkg_check_modules(MONGO REQUIRED libmongoc-1.0)
-pkg_check_modules(BSON REQUIRED libbson-1.0)
-
-add_subdirectory(db)
-add_subdirectory(auth)
+#find_package(PkgConfig)
+#pkg_check_modules(MONGO REQUIRED libmongoc-1.0)
+#pkg_check_modules(BSON REQUIRED libbson-1.0)
+#
+#add_subdirectory(db)
+#add_subdirectory(auth)
 
 
 file(GLOB FILE_SOURCES *.c)
@@ -20,10 +20,10 @@ file(GLOB FILE_HEADERS *.h)
 
 add_library(${PROJECT_NAME} STATIC ${FILE_SOURCES} ${FILE_HEADERS})
 
-target_link_libraries(${PROJECT_NAME} dap_crypto dap_auth dap_db)
+#target_link_libraries(${PROJECT_NAME} dap_core dap_crypto dap_auth dap_db)
+target_link_libraries(${PROJECT_NAME} dap_core dap_crypto dap_chain dap_chain_wallet)
 target_include_directories(${PROJECT_NAME} INTERFACE .)
 
 
 #set(${PROJECT_NAME}_DEFINITIONS CACHE INTERNAL "${PROJECT_NAME}: Definitions" FORCE)
-#
 #set(${PROJECT_NAME}_INCLUDE_DIRS ${PROJECT_SOURCE_DIR} CACHE INTERNAL "${PROJECT_NAME}: Include Directories" FORCE)
