@@ -83,7 +83,7 @@ char* dap_server_http_db_auth_create_service_key(const char *a_wallet_name)
  */
 char* dap_server_http_db_auth_create_key_hash(const char *a_wallet_name, char **a_addr_base58)
 {
-    const char *c_wallets_path = dap_config_get_item_str(g_config, "general", "wallets_path");
+    const char *c_wallets_path = dap_chain_wallet_get_path(g_config);
     dap_chain_wallet_t * l_wallet = dap_chain_wallet_open(a_wallet_name, c_wallets_path);
     if(!l_wallet)
         return NULL;
