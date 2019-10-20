@@ -107,7 +107,7 @@ char* dap_server_http_db_auth_create_key_hash(const char *a_wallet_name, char **
 
     // make dap_chain_sign_t hash
     dap_chain_hash_fast_t l_sign_hash;
-    if(dap_hash_fast(l_chain_sign, l_chain_sign_size, &l_sign_hash) < 0) {
+    if(!dap_hash_fast(l_chain_sign, l_chain_sign_size, &l_sign_hash) ) {
         return NULL;
     }
 
