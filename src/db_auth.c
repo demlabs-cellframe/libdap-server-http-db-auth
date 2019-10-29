@@ -36,10 +36,10 @@
 #include "dap_enc_http.h"
 #include "dap_enc_base64.h"
 #include "dap_server.h"
-#include "../db/db_core.h"
+#include "db_core.h"
 #include "db_auth.h"
 #include "http_status_code.h"
-#include "mongoc.h"
+#include <mongoc.h>
 
 
 #define LOG_TAG "db_auth"
