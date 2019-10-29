@@ -41,6 +41,8 @@
 #include "http_status_code.h"
 #include <mongoc.h>
 
+#include "SimpleFIPS202.h"
+
 
 #define LOG_TAG "db_auth"
 
@@ -326,8 +328,9 @@ bool db_auth_change_password(const char* user, const char* new_password)
 
     bson_error_t error;
 
-    char salt[8];
-    RAND_bytes(salt, 8);
+    char salt[9]={0};
+    dap_random_string_fill(salt,sizeof(salt));
+
 
     unsigned const char * password_hash = hash_password(new_password, salt, 8);
     char salt_b64[8*2] = {0};
@@ -735,8 +738,8 @@ db_auth_info_t * db_auth_register(const char *user,const char *password,
             (mongo_client, l_db_name, "dap_users");
     bson_error_t error;
 
-    char salt[8];
-    RAND_bytes(salt, 8);
+    char salt[9]={0};
+    dap_random_string_fill(salt, sizeof (salt));
 
     unsigned const char * password_hash = hash_password(password, salt, 8);
     char salt_b64[8*2] = {0};
@@ -859,8 +862,8 @@ db_auth_info_t * db_auth_register_channel(const char* name_channel, const char* 
             mongoc_client_get_collection (mongo_client, l_db_name, "dap_channels");
     bson_error_t error;
 
-    char salt[8];
-    RAND_bytes(salt, 8);
+    char salt[9]={0};
+    dap_random_string_fill(salt, sizeof (salt));
     unsigned const char * password_hash = hash_password(password, salt, 8);
 
     bson_t *doc = BCON_NEW("name_channel", name_channel,
@@ -1178,8 +1181,8 @@ inline static unsigned char* hash_password(const unsigned char* password, unsign
 
     memcpy(str, password, len_pswd);
     memcpy(str + len_pswd, salt, salt_size);
-    SHA512(str, length_str, md);
-    SHA512(salt, salt_size, md + DB_AUTH_HASH_LENGTH);
+    SHA3_512(md, str, length_str);
+    SHA3_512(md + DB_AUTH_HASH_LENGTH, salt, salt_size);
 
     return md;
 }
