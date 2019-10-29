@@ -1,29 +1,11 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.0)
 project (dap_server_http_db_auth)
+  
+set(AUTH_SRCS db_auth.c)
 
-# fix implicit declaration warnings
-add_definitions ("-D_GNU_SOURCE")
+add_library(${PROJECT_NAME} STATIC ${AUTH_SRCS})
 
-set(CMAKE_C_FLAGS "-std=c11 -Wall -Wextra")
+target_link_libraries(${PROJECT_NAME} dap_core
+    dap_crypto dap_http_server dap_enc_server
+    dap_stream dap_http_server_db )
 
- 
-#find_package(PkgConfig)
-#pkg_check_modules(MONGO REQUIRED libmongoc-1.0)
-#pkg_check_modules(BSON REQUIRED libbson-1.0)
-#
-#add_subdirectory(db)
-#add_subdirectory(auth)
-
-
-file(GLOB FILE_SOURCES *.c)
-file(GLOB FILE_HEADERS *.h)
-
-add_library(${PROJECT_NAME} STATIC ${FILE_SOURCES} ${FILE_HEADERS})
-
-#target_link_libraries(${PROJECT_NAME} dap_core dap_crypto dap_auth dap_db)
-target_link_libraries(${PROJECT_NAME} dap_core dap_crypto dap_chain dap_chain_wallet)
-target_include_directories(${PROJECT_NAME} INTERFACE .)
-
-
-#set(${PROJECT_NAME}_DEFINITIONS CACHE INTERNAL "${PROJECT_NAME}: Definitions" FORCE)
-#set(${PROJECT_NAME}_INCLUDE_DIRS ${PROJECT_SOURCE_DIR} CACHE INTERNAL "${PROJECT_NAME}: Include Directories" FORCE)
