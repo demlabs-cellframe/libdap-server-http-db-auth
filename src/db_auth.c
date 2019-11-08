@@ -56,10 +56,6 @@ static pthread_mutex_t mutex_on_auth_hash = PTHREAD_MUTEX_INITIALIZER;
 
 static bool mongod_is_running(void);
 
-static unsigned char* hash_password(const unsigned char* password,
-                                    unsigned char* salt,
-                                    size_t salt_size);
-
 static const char *l_db_name;
 
 int db_auth_init(const char* db_name)
@@ -328,38 +324,18 @@ bool db_auth_change_password(const char* user, const char* new_password)
 
     bson_error_t error;
 
-    char salt[9]={0};
-    dap_random_string_fill(salt,sizeof(salt));
 
 
-    unsigned const char * password_hash = hash_password(new_password, salt, 8);
-    char salt_b64[8*2] = {0};
-    dap_enc_base64_encode(salt, 8, salt_b64,DAP_ENC_DATA_TYPE_B64_URLSAFE);
+    char * password_hash_b64 = dap_server_db_hash_password_b64(new_password);
 
-    if (!password_hash) {
-        log_it(L_WARNING,"Can not memmory allocate");
-        return false;
-    }
-
-    unsigned char * password_hash_b64 = calloc(4 * DB_AUTH_HASH_LENGTH, sizeof(char));
-
-    if (!password_hash_b64) {
-        free((char*)password_hash);
-        log_it(L_WARNING,"Can not memmory allocate");
-        return false;
-    }
-
-    dap_enc_base64_encode(password_hash, DB_AUTH_HASH_LENGTH * 2, password_hash_b64,DAP_ENC_DATA_TYPE_B64_URLSAFE);
-
-
-    if (*password_hash_b64 == 0) {
+    if (password_hash_b64 == NULL) {
         log_it(L_WARNING,"Bad hash(based64) for user password");
         return false;
     }
 
     bson_t *update = BCON_NEW ("$set", "{",
-                               "passwordHash", BCON_UTF8 (password_hash_b64),
-                               "salt", BCON_UTF8 (salt_b64),"}");
+                                "passwordHash", BCON_UTF8 (password_hash_b64),
+                               "}");
 
     if (!mongoc_collection_update (collection_dap_users, MONGOC_UPDATE_NONE, doc_dap_user, update, NULL, &error)) {
         log_it(L_WARNING,"%s", error.message);
@@ -377,7 +353,7 @@ bool db_auth_change_password(const char* user, const char* new_password)
     if(doc_dap_user)
         bson_destroy(doc_dap_user);
 
-    free((char*)password_hash); free((char*)password_hash_b64);
+     DAP_DELETE( password_hash_b64 );
 
     log_it(L_INFO, "user: %s change password to %s", user, new_password);
     return true;
@@ -390,10 +366,10 @@ bool db_auth_change_password(const char* user, const char* new_password)
  * @param password
  * @return false if user password not correct
  */
-bool check_user_password(const char* user, const char* password)
+bool check_user_password(const char* a_user, const char* a_password)
 {
-    if ( exist_user_in_db(user) == false ){
-        log_it(L_WARNING,"User %s is not present in DB",user);
+    if ( exist_user_in_db(a_user) == false ){
+        log_it(L_WARNING,"User %s is not present in DB",a_user);
         return false;
     }
 
@@ -403,7 +379,7 @@ bool check_user_password(const char* user, const char* password)
                 mongo_client, l_db_name, "dap_users");
 
     bson_t *query = bson_new();
-    BSON_APPEND_UTF8 (query, "login", user);
+    BSON_APPEND_UTF8 (query, "login", a_user);
 
     bson_iter_t iter;
     bson_t *doc;
@@ -422,25 +398,16 @@ bool check_user_password(const char* user, const char* password)
 
     dap_enc_base64_decode(salt, 16, salt_from_b64,DAP_ENC_DATA_TYPE_B64);
 
-    unsigned const char*  password_hash = hash_password(password, salt_from_b64, 8);
-    if (!password_hash) {
+    char*  l_password_hash_b64 = dap_server_db_hash_password_b64(a_password);
+
+    if (!l_password_hash_b64) {
         log_it(L_ERROR, "Can not memmory allocate");
         return NULL;
     }
-
-    unsigned char * password_hash_b64 = calloc(4 * DB_AUTH_HASH_LENGTH, sizeof(char));
-
-    if (!password_hash_b64) {
-        free((char*)password_hash);
-        log_it(L_ERROR, "Can not memmory allocate");
-        return NULL;
-    }
-
-    dap_enc_base64_encode(password_hash, DB_AUTH_HASH_LENGTH * 2, password_hash_b64,DAP_ENC_DATA_TYPE_B64);
 
     if (bson_iter_init (&iter, doc) && bson_iter_find (&iter, "passwordHash"))
     {
-        if ( memcmp(password_hash_b64, bson_iter_value(&iter)->value.v_utf8.str,
+        if ( memcmp(l_password_hash_b64, bson_iter_value(&iter)->value.v_utf8.str,
                     DB_AUTH_HASH_LENGTH * 2) == 0 )
             is_correct_password = true;
     }
@@ -456,7 +423,7 @@ bool check_user_password(const char* user, const char* password)
     if(doc)
         bson_destroy(doc);
 
-    free((char*)password_hash); free((char*)password_hash_b64);
+    DAP_DELETE( l_password_hash_b64 );
 
     return is_correct_password;
 }
@@ -518,6 +485,46 @@ static bool db_auth_save_cookie_inform_in_db(const char* login, char* cookie)
     return result;
 }
 
+
+/**
+ * @brief dap_server_db_hash_password
+ * @param password
+ * @return
+ */
+unsigned char* dap_server_db_hash_password(const char* a_password)
+{
+    static const unsigned char s_salt[]={ 0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08 };
+    static const size_t s_salt_size=sizeof (s_salt);
+
+    unsigned char *md = DAP_NEW_Z_SIZE(unsigned char, DB_AUTH_HASH_LENGTH * 2);
+
+    size_t a_password_length = strlen(a_password);
+    size_t l_str_length = a_password_length + s_salt_size;
+    unsigned char *l_str = DAP_NEW_Z_SIZE(unsigned char, l_str_length);
+
+    memcpy(l_str, a_password, a_password_length);
+    memcpy(l_str + a_password_length, s_salt, s_salt_size);
+    SHA3_512(md, l_str, l_str_length);
+    SHA3_512(md + DB_AUTH_HASH_LENGTH, s_salt, s_salt_size);
+
+    DAP_DELETE( l_str );
+    return md;
+}
+
+char* dap_server_db_hash_password_b64(const char* a_password)
+{
+    unsigned char* l_hash = dap_server_db_hash_password( a_password);
+    char * l_hash_str = DAP_NEW_Z_SIZE(char, 4 * DB_AUTH_HASH_LENGTH+1 ) ;
+
+    if (!l_hash_str) {
+        DAP_DELETE( (char*)l_hash);
+        log_it(L_ERROR, "Can not memmory allocate");
+        return NULL;
+    }
+
+    dap_enc_base64_encode(l_hash, DB_AUTH_HASH_LENGTH * 2, l_hash_str,DAP_ENC_DATA_TYPE_B64_URLSAFE);
+    return  l_hash_str;
+}
 /**
  * @brief db_auth_login Authorization with user/password
  * @param login ( login = email )
@@ -556,16 +563,7 @@ int db_auth_login(const char* login, const char* password,
 
     bson_iter_t iter;
 
-    char salt[16] = {0}; char salt_from_b64[8]={0};
-    if (bson_iter_init (&iter, doc) && bson_iter_find (&iter, "salt"))
-        memcpy(salt,bson_iter_value(&iter)->value.v_utf8.str,16);
-    else {
-        log_it(L_ERROR, "Not find Salt in user"); return 0;
-    }
-
-    dap_enc_base64_decode(salt, 16, salt_from_b64,DAP_ENC_DATA_TYPE_B64_URLSAFE);
-
-    unsigned const char* password_hash = hash_password(password, salt_from_b64, 8);
+    unsigned const char* password_hash = dap_server_db_hash_password(password);
     if (!password_hash) {
         log_it(L_ERROR, "Can not memmory allocate");
         return 0;
@@ -581,17 +579,16 @@ int db_auth_login(const char* login, const char* password,
 
     dap_enc_base64_encode(password_hash, DB_AUTH_HASH_LENGTH * 2, password_hash_b64,DAP_ENC_DATA_TYPE_B64_URLSAFE);
 
-    if (bson_iter_init (&iter, doc) && bson_iter_find (&iter, "expire_date"))
-    {
+    if (bson_iter_init (&iter, doc) && bson_iter_find (&iter, "expire_date")) {
         if ( bson_iter_date_time(&iter) / 1000 < time(NULL) )
         {
             log_it(L_WARNING, "Subscribe %s has been expiried", login);
             return 4;
         }
-    }
+    }else
+        log_it(L_NOTICE, "Haven't found expire_date in collection");
 
-    if (bson_iter_init (&iter, doc) && bson_iter_find (&iter, "passwordHash"))
-    {
+    if (bson_iter_init (&iter, doc) && bson_iter_find (&iter, "passwordHash")) {
         if ( memcmp(password_hash_b64, bson_iter_value(&iter)->value.v_utf8.str,
                     DB_AUTH_HASH_LENGTH * 2) == 0 )
         {
@@ -671,7 +668,11 @@ int db_auth_login(const char* login, const char* password,
             pthread_mutex_lock(&mutex_on_auth_hash);
             HASH_ADD_STR(auths,cookie,(*ai));
             pthread_mutex_unlock(&mutex_on_auth_hash);
+        }else{
+            log_it(L_WARNING, "Input password has hash %s but expected to have %s",password_hash_b64, bson_iter_value(&iter)->value.v_utf8.str );
         }
+    }else{
+        log_it(L_WARNING, "No passwordHash in data");
     }
 
     free(password_hash_b64);
@@ -738,36 +739,22 @@ db_auth_info_t * db_auth_register(const char *user,const char *password,
             (mongo_client, l_db_name, "dap_users");
     bson_error_t error;
 
-    char salt[9]={0};
-    dap_random_string_fill(salt, sizeof (salt));
 
-    unsigned const char * password_hash = hash_password(password, salt, 8);
-    char salt_b64[8*2] = {0};
-    dap_enc_base64_encode(salt, 8, salt_b64,DAP_ENC_DATA_TYPE_B64_URLSAFE);
 
-    if (!password_hash) {
+    char * l_password_hash_b64 = dap_server_db_hash_password_b64(password);
+
+    if (!l_password_hash_b64) {
         log_it(L_ERROR, "Can not memmory allocate");
         return NULL;
     }
 
-    unsigned char * password_hash_b64 = calloc(4 * DB_AUTH_HASH_LENGTH, sizeof(char));
-
-    if (!password_hash_b64) {
-        free((char*)password_hash);
-        log_it(L_ERROR, "Can not memmory allocate");
-        return NULL;
-    }
-
-    dap_enc_base64_encode(password_hash, DB_AUTH_HASH_LENGTH * 2, password_hash_b64,DAP_ENC_DATA_TYPE_B64_URLSAFE);
-
-    if (*password_hash_b64 == 0) {
+    if (*l_password_hash_b64 == 0) {
         log_it(L_ERROR, "Bad hash(based64) for user password");
         return NULL;
     }
 
     bson_t *doc = BCON_NEW("login", user,
-                           "passwordHash", password_hash_b64,
-                           "salt",salt_b64,
+                           "passwordHash", l_password_hash_b64,
                            "domainId", BCON_OID((bson_oid_t*)bson_iter_value(&iter)->value.v_oid.bytes),
                            "email", email,
                            "profile",
@@ -776,8 +763,7 @@ db_auth_info_t * db_auth_register(const char *user,const char *password,
                            "last_name", last_name,
                            "}",
                            "contacts" , "[","]");
-    free((char*)password_hash);
-    free(password_hash_b64);
+    free(l_password_hash_b64);
 
     if (!mongoc_collection_insert (collection, MONGOC_INSERT_NONE, doc, NULL, &error)) {
         log_it (L_WARNING, "%s\n", error.message);
@@ -862,19 +848,17 @@ db_auth_info_t * db_auth_register_channel(const char* name_channel, const char* 
             mongoc_client_get_collection (mongo_client, l_db_name, "dap_channels");
     bson_error_t error;
 
-    char salt[9]={0};
-    dap_random_string_fill(salt, sizeof (salt));
-    unsigned const char * password_hash = hash_password(password, salt, 8);
+
+    char * l_password_hash_b64 = dap_server_db_hash_password_b64(password);
 
     bson_t *doc = BCON_NEW("name_channel", name_channel,
-                           "passwordHash", password_hash,
-                           "salt",salt,
+                           "passwordHash", l_password_hash_b64,
                            "domainId", BCON_OID((bson_oid_t*)bson_iter_value(&iter)->value.v_oid.bytes),
                            "subscribers", "[","]",
                            "last_id_message", BCON_INT32(0),
                            "messages","[","]");
 
-    free((char*)password_hash);
+    DAP_DELETE( l_password_hash_b64 );
     if (!mongoc_collection_insert (collection, MONGOC_INSERT_NONE, doc, NULL, &error)) {
         log_it (L_ERROR, "%s\n", error.message);
         bson_destroy(query);
@@ -1171,21 +1155,7 @@ static bool mongod_is_running()
     return true;
 }
 
-inline static unsigned char* hash_password(const unsigned char* password, unsigned char* salt, size_t salt_size)
-{
-    unsigned char *md = (unsigned char*) malloc (DB_AUTH_HASH_LENGTH * 2);
 
-    size_t len_pswd = strlen(password);
-    size_t length_str = len_pswd + salt_size;
-    char str[length_str];
-
-    memcpy(str, password, len_pswd);
-    memcpy(str + len_pswd, salt, salt_size);
-    SHA3_512(md, str, length_str);
-    SHA3_512(md + DB_AUTH_HASH_LENGTH, salt, salt_size);
-
-    return md;
-}
 
 /// Check user data for correct input.
 /// @param before_parsing Line size before parsing.

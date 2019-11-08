@@ -70,6 +70,9 @@ bool db_auth_change_password(const char *user, const char* new_password);
 
 bool check_user_password(const char* user, const char* password);
 
+unsigned char* dap_server_db_hash_password(const char* a_password);
+char* dap_server_db_hash_password_b64(const char* a_password);
+
 void db_auth_http_proc(enc_http_delegate_t *dg, void * arg);
 
 void db_auth_traffic_track_callback(dap_server_t *srv);
