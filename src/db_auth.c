@@ -609,7 +609,7 @@ int db_auth_login(const char* login, const char* password,
                 if ( mongoc_cursor_next (cursor_dap_domains, (const bson_t**)&doc_dap_domain) == false )
                 {
                     log_it(L_WARNING, "Login Error! "
-                                      "Domain not found in DataBase (collection dap_domains)");
+                                      "Domains not found in DataBase (collection dap_domains)");
 
                     b_error = true;
                 }
@@ -620,8 +620,8 @@ int db_auth_login(const char* login, const char* password,
                     bson_destroy (doc_dap_domain);
                 mongoc_collection_destroy (collection_dap_domain);
 
-                if(b_error)
-                    return 0;
+                //if(b_error)
+                //    return 0;
             }
 
             log_it(L_INFO,"Login accepted");
