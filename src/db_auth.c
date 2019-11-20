@@ -58,6 +58,8 @@ static bool mongod_is_running(void);
 
 static const char *l_db_name;
 
+dap_enc_http_callback_t s_callback_success = NULL;
+
 int db_auth_init(const char* db_name)
 {
     l_db_name = strdup(db_name);
@@ -75,6 +77,15 @@ int db_auth_init(const char* db_name)
 void db_auth_deinit()
 {
     free((char*)l_db_name);
+}
+
+/**
+ * @brief db_auth_set_callbacks
+ * @param a_callback_success
+ */
+void db_auth_set_callbacks(dap_enc_http_callback_t a_callback_success)
+{
+    s_callback_success = a_callback_success;
 }
 
 static void _save_cpu_monitor_stats_in_db(dap_server_t *srv)
@@ -923,54 +934,57 @@ bool exist_user_in_db(const char* user)
     return exist;
 }
 
+
+
 /**
  * @brief db_auth_http_proc DB Auth http interface
- * @param cl_st HTTP Simple client instance
- * @param arg Pointer to bool with okay status (true if everything is ok, by default)
+ * @param a_delegate HTTP Simple client instance
+ * @param a_arg Pointer to bool with okay status (true if everything is ok, by default)
  */
-void db_auth_http_proc(enc_http_delegate_t *dg, void * arg)
+void db_auth_http_proc(enc_http_delegate_t *a_delegate, void * a_arg)
 {
-    http_status_code_t * return_code = (http_status_code_t*)arg;
+    http_status_code_t * return_code = (http_status_code_t*)a_arg;
 
-    if((dg->request)&&(strcmp(dg->action,"POST")==0)){
-        if(dg->in_query==NULL){
+    if((a_delegate->request)&&(strcmp(a_delegate->action,"POST")==0)){
+        if(a_delegate->in_query==NULL){
             log_it(L_WARNING,"Empty auth action");
             *return_code = Http_Status_BadRequest;
             return;
         }else{
-            if(strcmp(dg->in_query,"logout")==0 ){
-                db_auth_info_t * ai = db_auth_info_by_cookie(dg->cookie);
+            if(strcmp(a_delegate->in_query,"logout")==0 ){
+                db_auth_info_t * ai = db_auth_info_by_cookie(a_delegate->cookie);
                 if(ai){
                     log_it(L_DEBUG, "Cookie from %s user accepted, 0x%032llX session",ai->user,ai->id);
                     pthread_mutex_lock(&mutex_on_auth_hash);
                     HASH_DEL(auths,ai);
                     pthread_mutex_unlock(&mutex_on_auth_hash);
                     free(ai);
-                    enc_http_reply_f(dg,
+                    enc_http_reply_f(a_delegate,
                                      "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n"
                                      "<return>Successfuly logouted</return>\n"
                                      );
                     *return_code = Http_Status_OK;
                 }else{
                     log_it(L_NOTICE,"Logout action: session 0x%032llX is already logouted (by timeout?)",ai->id);
-                    enc_http_reply_f(dg,
+                    enc_http_reply_f(a_delegate,
                                      "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n"
                                      "<err_str>No session in table</err_str>\n"
                                      );
                     *return_code = Http_Status_OK;
                 }
 
-            }else if(strcmp(dg->in_query,"login")==0 ){
-                char user[256];
-                char password[1024];
-                char domain[64];
+            }else if(strcmp(a_delegate->in_query,"login")==0 ){
+                char l_user[256]={0};
+                char l_password[1024]={0};
+                char l_domain[64]={0};
+                char l_pkey[4096]={0};
 
-                if(sscanf(dg->request_str,"%255s %1023s %63s",user,password,domain)==3){
-                    log_it(L_INFO, "Trying to login with username '%s'",user);
+                if(sscanf(a_delegate->request_str,"%255s %1023s %63s %4095s",l_user,l_password,l_domain,l_pkey)>=3){
+                    log_it(L_INFO, "Trying to login with username '%s'",l_user);
 
-                    if(!check_user_data_for_space(strlen(dg->request_str), (strlen(user)+strlen(password)+strlen(domain)))){
+                    if(!check_user_data_for_space(strlen(a_delegate->request_str), (strlen(l_user)+strlen(l_password)+strlen(l_domain)))){
                         log_it(L_WARNING,"Wrong symbols in username or password or domain");
-                        enc_http_reply_f(dg, OP_CODE_INCORRECT_SYMOLS);
+                        enc_http_reply_f(a_delegate, OP_CODE_INCORRECT_SYMOLS);
                         *return_code = Http_Status_BadRequest;
                         return;
                     }
@@ -993,37 +1007,41 @@ void db_auth_http_proc(enc_http_delegate_t *dg, void * arg)
 //                        return;
 //                    }
 
-                    db_auth_info_t * ai = NULL;
-                    short login_result = db_auth_login(user, password, domain, &ai);
+                    db_auth_info_t * l_auth_info = NULL;
+                    short login_result = db_auth_login(l_user, l_password, l_domain, &l_auth_info);
                     switch (login_result) {
                     case 1:
-                        ai->dap_http_client = dg->http;
-                        ai->auth_date = time(NULL);
-                        enc_http_reply_f(dg,
+                        l_auth_info->dap_http_client = a_delegate->http;
+                        l_auth_info->auth_date = time(NULL);
+                        if (l_pkey[0] )
+                            strncpy(l_auth_info->pkey,l_pkey, sizeof (l_auth_info->pkey)-1);
+                        enc_http_reply_f(a_delegate,
                                          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n"
                                          "<auth_info>\n"
                                          );
-                        enc_http_reply_f(dg,"\t<first_name>%s</first_name>\n",ai->first_name);
-                        enc_http_reply_f(dg,"\t<last_name>%s</last_name>\n",ai->last_name);
-                        enc_http_reply_f(dg,"\t<cookie>%s</cookie>\n",ai->cookie);
-                        enc_http_reply_f(dg,"</auth_info>");
-                        log_it(L_INFO, "Login: Successfuly logined user %s",user);
+                        enc_http_reply_f(a_delegate,"\t<first_name>%s</first_name>\n",l_auth_info->first_name);
+                        enc_http_reply_f(a_delegate,"\t<last_name>%s</last_name>\n",l_auth_info->last_name);
+                        enc_http_reply_f(a_delegate,"\t<cookie>%s</cookie>\n",l_auth_info->cookie);
+                        if (s_callback_success)
+                            s_callback_success (a_delegate, l_auth_info); // Here if smbd want to add smth to the output
+                        enc_http_reply_f(a_delegate,"</auth_info>");
+                        log_it(L_INFO, "Login: Successfuly logined user %s",l_user);
                         *return_code = Http_Status_OK;
                         break;
                     case 2:
-                        enc_http_reply_f(dg, OP_CODE_NOT_FOUND_LOGIN_IN_DB);
+                        enc_http_reply_f(a_delegate, OP_CODE_NOT_FOUND_LOGIN_IN_DB);
                         *return_code = Http_Status_OK;
                         break;
                     case 3:
-                        enc_http_reply_f(dg, OP_CODE_LOGIN_INCORRECT_PSWD);
+                        enc_http_reply_f(a_delegate, OP_CODE_LOGIN_INCORRECT_PSWD);
                         *return_code = Http_Status_OK;
                         break;
                     case 4:
-                        enc_http_reply_f(dg, OP_CODE_SUBSCRIBE_EXPIRIED);
+                        enc_http_reply_f(a_delegate, OP_CODE_SUBSCRIBE_EXPIRIED);
                         *return_code = Http_Status_PaymentRequired;
                         break;
                     default:
-                        log_it(L_DEBUG, "Login: wrong password for user %s",user);
+                        log_it(L_DEBUG, "Login: wrong password for user %s",l_user);
                         *return_code = Http_Status_BadRequest;
                         break;
                     }
@@ -1031,7 +1049,7 @@ void db_auth_http_proc(enc_http_delegate_t *dg, void * arg)
                     log_it(L_DEBUG, "Login: wrong auth's request body ");
                     *return_code = Http_Status_BadRequest;
                 }
-            }else if (strcmp(dg->in_query,"register")==0){
+            }else if (strcmp(a_delegate->in_query,"register")==0){
                 char user[256];
                 char password[1024];
                 char domain[64];
@@ -1044,8 +1062,8 @@ void db_auth_http_proc(enc_http_delegate_t *dg, void * arg)
                 char app_version[32];
                 char sys_uuid[128];
 
-                log_it(L_INFO, "Request str = %s", dg->request_str);
-                if(sscanf(dg->request_str,"%255s %63s %1023s %1023s %1023s %1023s %32s %128s"
+                log_it(L_INFO, "Request str = %s", a_delegate->request_str);
+                if(sscanf(a_delegate->request_str,"%255s %63s %1023s %1023s %1023s %1023s %32s %128s"
                           ,user,password,domain,first_name,last_name,email,device_type,app_version)>=7){
                     if(db_input_validation(user)==0){
                         log_it(L_WARNING,"Registration: Wrong symbols in the username '%s'",user);
@@ -1079,18 +1097,18 @@ void db_auth_http_proc(enc_http_delegate_t *dg, void * arg)
                     }
 
                     db_auth_info_t * ai = db_auth_register(user,password,domain,first_name,last_name,email,
-                                                           device_type,app_version,dg->http->client->hostaddr,sys_uuid);
+                                                           device_type,app_version,a_delegate->http->client->hostaddr,sys_uuid);
 
                     if(ai != NULL)
                     {
-                        enc_http_reply_f(dg,
+                        enc_http_reply_f(a_delegate,
                                          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n"
                                          "<auth_info>\n"
                                          );
-                        enc_http_reply_f(dg,"\t<first_name>%s</first_name>\n",ai->first_name);
-                        enc_http_reply_f(dg,"\t<last_name>%s</last_name>\n",ai->last_name);
-                        enc_http_reply_f(dg,"\t<cookie>%s</cookie>\n",ai->cookie);
-                        enc_http_reply_f(dg,"</auth_info>");
+                        enc_http_reply_f(a_delegate,"\t<first_name>%s</first_name>\n",ai->first_name);
+                        enc_http_reply_f(a_delegate,"\t<last_name>%s</last_name>\n",ai->last_name);
+                        enc_http_reply_f(a_delegate,"\t<cookie>%s</cookie>\n",ai->cookie);
+                        enc_http_reply_f(a_delegate,"</auth_info>");
 
                         log_it(L_NOTICE,"Registration: new user %s \"%s %s\"<%s> is registred",user,first_name,last_name,email);
                     }
@@ -1102,12 +1120,12 @@ void db_auth_http_proc(enc_http_delegate_t *dg, void * arg)
                     *return_code = Http_Status_BadRequest;
                 }
             }else{
-                log_it(L_ERROR, "Unknown auth command was selected (query_string='%s')",dg->in_query);
+                log_it(L_ERROR, "Unknown auth command was selected (query_string='%s')",a_delegate->in_query);
                 *return_code = Http_Status_BadRequest;
             }
         }
     }else{
-        log_it(L_ERROR, "Wrong auth request action '%s'",dg->action);
+        log_it(L_ERROR, "Wrong auth request action '%s'",a_delegate->action);
         *return_code = Http_Status_BadRequest;
     }
 }

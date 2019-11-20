@@ -36,6 +36,7 @@ typedef struct db_auth_info{
     char email[1024];
     char user[256];
     char password[1024];
+    char pkey[4096];
     time_t auth_date;
 
     /* pointer on low-level client only for read! */
@@ -44,9 +45,13 @@ typedef struct db_auth_info{
     UT_hash_handle hh; // makes this structure hashable with UTHASH library
 } db_auth_info_t;
 
+
+
+
 int db_auth_init(const char* db_name);
 void db_auth_deinit(void);
 
+void db_auth_set_callbacks(dap_enc_http_callback_t a_callback_success);
 
 db_auth_info_t* db_auth_info_by_cookie(const char * cookie);
 db_auth_info_t* db_search_cookie_in_db(const char * cookie);
