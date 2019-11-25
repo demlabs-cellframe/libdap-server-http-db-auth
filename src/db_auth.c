@@ -126,7 +126,7 @@ void db_auth_traffic_track_callback(dap_server_t *srv)
         return;
     }
 
-    bson_t *docs[auth_count];
+    bson_t **docs = DAP_NEW_Z_SIZE(bson_t*,auth_count*sizeof(bson_t*));
     {
         bson_oid_t oid;
         size_t idx = 0;
@@ -135,8 +135,8 @@ void db_auth_traffic_track_callback(dap_server_t *srv)
             docs[idx] = BCON_NEW("user_id", BCON_OID(&oid),
                                  "download_speed", BCON_DOUBLE(client->dap_http_client->client->download_stat.speed_mbs),
                                  "upload_speed", BCON_DOUBLE(client->dap_http_client->client->upload_stat.speed_mbs),
-                                 "download_bytes", BCON_INT64(client->dap_http_client->client->download_stat.buf_size_total),
-                                 "upload_bytes", BCON_INT64(client->dap_http_client->client->upload_stat.buf_size_total),
+                                 "download_bytes", BCON_INT64((int64_t) client->dap_http_client->client->download_stat.buf_size_total),
+                                 "upload_bytes", BCON_INT64((int64_t) client->dap_http_client->client->upload_stat.buf_size_total),
                                  "auth_date", BCON_DATE_TIME(client->auth_date * 1000));
             // log_it(L_DEBUG, "%s", bson_as_json(docs[idx], NULL));
             idx++;
@@ -146,7 +146,9 @@ void db_auth_traffic_track_callback(dap_server_t *srv)
 
     mongoc_collection_t * collection =  mongoc_client_get_collection (traffick_track_db_client, l_db_name, "dap_traffic_stats");
 
-    bool insert_ok = mongoc_collection_insert_bulk(collection, MONGOC_INSERT_NONE, docs, auth_count, NULL, NULL);
+    bson_error_t l_error={0};
+    bson_t l_reply ={0};
+    bool insert_ok = mongoc_collection_insert_many(collection,(const bson_t*) docs, auth_count, NULL,&l_reply, &l_error);
     if(!insert_ok) {
         log_it(L_ERROR, "Can't insert documents in databse");
     }
@@ -155,6 +157,7 @@ void db_auth_traffic_track_callback(dap_server_t *srv)
         bson_destroy(docs[i]);
 
     mongoc_collection_destroy(collection);
+    DAP_DELETE(docs);
 }
 
 /**
@@ -372,6 +375,62 @@ bool db_auth_change_password(const char* user, const char* new_password)
 
 
 /**
+ * @brief db_auth_set_field_str
+ * @param a_user
+ * @param a_field_name
+ * @param a_field_value
+ * @return
+ */
+bool db_auth_set_field_str(const char* a_user, const char* a_field_name, const char * a_field_value)
+{
+    if ( exist_user_in_db(a_user) == false )
+    {
+        log_it(L_WARNING, "Error set field str. User %s not find" , a_user);
+        return false;
+    }
+
+    mongoc_collection_t *l_collection_dap_users = mongoc_client_get_collection
+            (mongo_client, l_db_name, "dap_cookie_history");
+
+    bson_t *l_query = bson_new();
+
+    BSON_APPEND_UTF8 (l_query, "login", a_user);
+
+    mongoc_cursor_t *l_cursor_dap_users = mongoc_collection_find
+            (l_collection_dap_users, MONGOC_QUERY_NONE, 0, 0, 0, l_query, NULL, NULL);
+
+    bson_t *l_doc_dap_user;
+
+    mongoc_cursor_next (l_cursor_dap_users, (const bson_t**)&l_doc_dap_user);
+
+    bson_error_t l_error;
+
+    bson_t *l_update = BCON_NEW ("$set", "{",
+                                a_field_name, BCON_UTF8 (a_field_value),
+                               "}");
+
+    if (!mongoc_collection_update (l_collection_dap_users, MONGOC_UPDATE_NONE, l_doc_dap_user, l_update, NULL, &l_error)) {
+        log_it(L_WARNING,"%s", l_error.message);
+        return false;
+    }
+
+    mongoc_collection_destroy(l_collection_dap_users);
+
+    if(l_query)
+        bson_destroy(l_query);
+
+    if(l_cursor_dap_users)
+        mongoc_cursor_destroy(l_cursor_dap_users);
+
+    if(l_doc_dap_user)
+        bson_destroy(l_doc_dap_user);
+
+    log_it(L_INFO, "set field \"%s\" with string \"%s\"", a_field_name, a_field_value );
+    return true;
+}
+
+
+/**
  * @brief check_user_password
  * @param user
  * @param password
@@ -440,7 +499,7 @@ bool check_user_password(const char* a_user, const char* a_password)
 }
 
 
-static bool db_auth_save_cookie_inform_in_db(const char* login, char* cookie)
+static bool s_save_cookie_inform_in_db(const char* login, db_auth_info_t * a_auth_info)
 {
     bool result = true;
     mongoc_collection_t *collection = mongoc_client_get_collection (
@@ -463,7 +522,8 @@ static bool db_auth_save_cookie_inform_in_db(const char* login, char* cookie)
     {
         bson_doc = BCON_NEW ("$set", "{",
                              "login", BCON_UTF8 (login),
-                             "cookie", BCON_UTF8 (cookie),
+                             "cookie", BCON_UTF8 (a_auth_info->cookie),
+                             "pkey", BCON_UTF8 (a_auth_info->pkey),
                              "last_use", BCON_DATE_TIME(mktime (utc_date_time) * 1000),
                              "}");
 
@@ -475,7 +535,8 @@ static bool db_auth_save_cookie_inform_in_db(const char* login, char* cookie)
     else
     {
         bson_doc = BCON_NEW("login", BCON_UTF8 (login),
-                            "cookie", BCON_UTF8 (cookie),
+                            "cookie", BCON_UTF8 (a_auth_info->cookie),
+                            "pkey", BCON_UTF8 (a_auth_info->pkey),
                             "last_use", BCON_DATE_TIME(mktime (utc_date_time) * 1000));
 
         if (!mongoc_collection_insert (collection, MONGOC_INSERT_NONE, bson_doc, NULL, &error))
@@ -675,7 +736,7 @@ int db_auth_login(const char* login, const char* password,
                 (*ai)->cookie[i] = 65 + rand() % 25;
 
             log_it(L_DEBUG,"Store cookie '%s' in the hash table",(*ai)->cookie);
-            db_auth_save_cookie_inform_in_db(login, (*ai)->cookie);
+            s_save_cookie_inform_in_db(login, (*ai));
             pthread_mutex_lock(&mutex_on_auth_hash);
             HASH_ADD_STR(auths,cookie,(*ai));
             pthread_mutex_unlock(&mutex_on_auth_hash);
@@ -984,6 +1045,7 @@ void db_auth_http_proc(enc_http_delegate_t *a_delegate, void * a_arg)
 
                     if(!check_user_data_for_space(strlen(a_delegate->request_str), (strlen(l_user)+strlen(l_password)+strlen(l_domain)))){
                         log_it(L_WARNING,"Wrong symbols in username or password or domain");
+                        log_it(L_DEBUG,"%s@%s %s", l_user,l_pkey);
                         enc_http_reply_f(a_delegate, OP_CODE_INCORRECT_SYMOLS);
                         *return_code = Http_Status_BadRequest;
                         return;

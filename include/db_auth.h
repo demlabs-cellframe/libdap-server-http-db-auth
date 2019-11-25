@@ -45,9 +45,6 @@ typedef struct db_auth_info{
     UT_hash_handle hh; // makes this structure hashable with UTHASH library
 } db_auth_info_t;
 
-
-
-
 int db_auth_init(const char* db_name);
 void db_auth_deinit(void);
 
@@ -88,3 +85,5 @@ void db_auth_traffic_track_callback(dap_server_t *srv);
 /// @return Returns true if user data is entered correctly
 /// (there are 2 separator spaces), otherwise false.
 inline bool check_user_data_for_space(size_t before_parsing, size_t after_parsing);
+
+bool db_auth_set_field_str(const char* a_user, const char* a_field_name, const char * a_field_value);
