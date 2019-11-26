@@ -55,11 +55,9 @@ static pthread_mutex_t mutex_on_auth_hash = PTHREAD_MUTEX_INITIALIZER;
 
 static bool mongod_is_running(void);
 
-static unsigned char* hash_password(const unsigned char* password,
-                                    unsigned char* salt,
-                                    size_t salt_size);
-
 static const char *l_db_name;
+
+dap_enc_http_callback_t s_callback_success = NULL;
 
 int db_auth_init(const char* db_name)
 {
@@ -78,6 +76,15 @@ int db_auth_init(const char* db_name)
 void db_auth_deinit()
 {
     free((char*)l_db_name);
+}
+
+/**
+ * @brief db_auth_set_callbacks
+ * @param a_callback_success
+ */
+void db_auth_set_callbacks(dap_enc_http_callback_t a_callback_success)
+{
+    s_callback_success = a_callback_success;
 }
 
 static void _save_cpu_monitor_stats_in_db(dap_server_t *srv)
@@ -118,7 +125,7 @@ void db_auth_traffic_track_callback(dap_server_t *srv)
         return;
     }
 
-    bson_t *docs[auth_count];
+    bson_t **docs = DAP_NEW_Z_SIZE(bson_t*,auth_count*sizeof(bson_t*));
     {
         bson_oid_t oid;
         size_t idx = 0;
@@ -127,8 +134,8 @@ void db_auth_traffic_track_callback(dap_server_t *srv)
             docs[idx] = BCON_NEW("user_id", BCON_OID(&oid),
                                  "download_speed", BCON_DOUBLE(client->dap_http_client->client->download_stat.speed_mbs),
                                  "upload_speed", BCON_DOUBLE(client->dap_http_client->client->upload_stat.speed_mbs),
-                                 "download_bytes", BCON_INT64(client->dap_http_client->client->download_stat.buf_size_total),
-                                 "upload_bytes", BCON_INT64(client->dap_http_client->client->upload_stat.buf_size_total),
+                                 "download_bytes", BCON_INT64((int64_t) client->dap_http_client->client->download_stat.buf_size_total),
+                                 "upload_bytes", BCON_INT64((int64_t) client->dap_http_client->client->upload_stat.buf_size_total),
                                  "auth_date", BCON_DATE_TIME(client->auth_date * 1000));
             // log_it(L_DEBUG, "%s", bson_as_json(docs[idx], NULL));
             idx++;
@@ -138,7 +145,9 @@ void db_auth_traffic_track_callback(dap_server_t *srv)
 
     mongoc_collection_t * collection =  mongoc_client_get_collection (traffick_track_db_client, l_db_name, "dap_traffic_stats");
 
-    bool insert_ok = mongoc_collection_insert_bulk(collection, MONGOC_INSERT_NONE, docs, auth_count, NULL, NULL);
+    bson_error_t l_error={0};
+    bson_t l_reply ={0};
+    bool insert_ok = mongoc_collection_insert_many(collection,(const bson_t*) docs, auth_count, NULL,&l_reply, &l_error);
     if(!insert_ok) {
         log_it(L_ERROR, "Can't insert documents in databse");
     }
@@ -147,6 +156,7 @@ void db_auth_traffic_track_callback(dap_server_t *srv)
         bson_destroy(docs[i]);
 
     mongoc_collection_destroy(collection);
+    DAP_DELETE(docs);
 }
 
 /**
@@ -327,38 +337,18 @@ bool db_auth_change_password(const char* user, const char* new_password)
 
     bson_error_t error;
 
-    char salt[9]={0};
-    dap_random_string_fill(salt,sizeof(salt));
 
 
-    unsigned const char * password_hash = hash_password(new_password, salt, 8);
-    char salt_b64[8*2] = {0};
-    dap_enc_base64_encode(salt, 8, salt_b64,DAP_ENC_DATA_TYPE_B64_URLSAFE);
+    char * password_hash_b64 = dap_server_db_hash_password_b64(new_password);
 
-    if (!password_hash) {
-        log_it(L_WARNING,"Can not memmory allocate");
-        return false;
-    }
-
-    unsigned char * password_hash_b64 = calloc(4 * DB_AUTH_HASH_LENGTH, sizeof(char));
-
-    if (!password_hash_b64) {
-        free((char*)password_hash);
-        log_it(L_WARNING,"Can not memmory allocate");
-        return false;
-    }
-
-    dap_enc_base64_encode(password_hash, DB_AUTH_HASH_LENGTH * 2, password_hash_b64,DAP_ENC_DATA_TYPE_B64_URLSAFE);
-
-
-    if (*password_hash_b64 == 0) {
+    if (password_hash_b64 == NULL) {
         log_it(L_WARNING,"Bad hash(based64) for user password");
         return false;
     }
 
     bson_t *update = BCON_NEW ("$set", "{",
-                               "passwordHash", BCON_UTF8 (password_hash_b64),
-                               "salt", BCON_UTF8 (salt_b64),"}");
+                                "passwordHash", BCON_UTF8 (password_hash_b64),
+                               "}");
 
     if (!mongoc_collection_update (collection_dap_users, MONGOC_UPDATE_NONE, doc_dap_user, update, NULL, &error)) {
         log_it(L_WARNING,"%s", error.message);
@@ -376,9 +366,65 @@ bool db_auth_change_password(const char* user, const char* new_password)
     if(doc_dap_user)
         bson_destroy(doc_dap_user);
 
-    free((char*)password_hash); free((char*)password_hash_b64);
+     DAP_DELETE( password_hash_b64 );
 
     log_it(L_INFO, "user: %s change password to %s", user, new_password);
+    return true;
+}
+
+
+/**
+ * @brief db_auth_set_field_str
+ * @param a_user
+ * @param a_field_name
+ * @param a_field_value
+ * @return
+ */
+bool db_auth_set_field_str(const char* a_user, const char* a_field_name, const char * a_field_value)
+{
+    if ( exist_user_in_db(a_user) == false )
+    {
+        log_it(L_WARNING, "Error set field str. User %s not find" , a_user);
+        return false;
+    }
+
+    mongoc_collection_t *l_collection_dap_users = mongoc_client_get_collection
+            (mongo_client, l_db_name, "dap_cookie_history");
+
+    bson_t *l_query = bson_new();
+
+    BSON_APPEND_UTF8 (l_query, "login", a_user);
+
+    mongoc_cursor_t *l_cursor_dap_users = mongoc_collection_find
+            (l_collection_dap_users, MONGOC_QUERY_NONE, 0, 0, 0, l_query, NULL, NULL);
+
+    bson_t *l_doc_dap_user;
+
+    mongoc_cursor_next (l_cursor_dap_users, (const bson_t**)&l_doc_dap_user);
+
+    bson_error_t l_error;
+
+    bson_t *l_update = BCON_NEW ("$set", "{",
+                                a_field_name, BCON_UTF8 (a_field_value),
+                               "}");
+
+    if (!mongoc_collection_update (l_collection_dap_users, MONGOC_UPDATE_NONE, l_doc_dap_user, l_update, NULL, &l_error)) {
+        log_it(L_WARNING,"%s", l_error.message);
+        return false;
+    }
+
+    mongoc_collection_destroy(l_collection_dap_users);
+
+    if(l_query)
+        bson_destroy(l_query);
+
+    if(l_cursor_dap_users)
+        mongoc_cursor_destroy(l_cursor_dap_users);
+
+    if(l_doc_dap_user)
+        bson_destroy(l_doc_dap_user);
+
+    log_it(L_INFO, "set field \"%s\" with string \"%s\"", a_field_name, a_field_value );
     return true;
 }
 
@@ -389,10 +435,10 @@ bool db_auth_change_password(const char* user, const char* new_password)
  * @param password
  * @return false if user password not correct
  */
-bool check_user_password(const char* user, const char* password)
+bool check_user_password(const char* a_user, const char* a_password)
 {
-    if ( exist_user_in_db(user) == false ){
-        log_it(L_WARNING,"User %s is not present in DB",user);
+    if ( exist_user_in_db(a_user) == false ){
+        log_it(L_WARNING,"User %s is not present in DB",a_user);
         return false;
     }
 
@@ -402,7 +448,7 @@ bool check_user_password(const char* user, const char* password)
                 mongo_client, l_db_name, "dap_users");
 
     bson_t *query = bson_new();
-    BSON_APPEND_UTF8 (query, "login", user);
+    BSON_APPEND_UTF8 (query, "login", a_user);
 
     bson_iter_t iter;
     bson_t *doc;
@@ -421,25 +467,16 @@ bool check_user_password(const char* user, const char* password)
 
     dap_enc_base64_decode(salt, 16, salt_from_b64,DAP_ENC_DATA_TYPE_B64);
 
-    unsigned const char*  password_hash = hash_password(password, salt_from_b64, 8);
-    if (!password_hash) {
+    char*  l_password_hash_b64 = dap_server_db_hash_password_b64(a_password);
+
+    if (!l_password_hash_b64) {
         log_it(L_ERROR, "Can not memmory allocate");
         return NULL;
     }
-
-    unsigned char * password_hash_b64 = calloc(4 * DB_AUTH_HASH_LENGTH, sizeof(char));
-
-    if (!password_hash_b64) {
-        free((char*)password_hash);
-        log_it(L_ERROR, "Can not memmory allocate");
-        return NULL;
-    }
-
-    dap_enc_base64_encode(password_hash, DB_AUTH_HASH_LENGTH * 2, password_hash_b64,DAP_ENC_DATA_TYPE_B64);
 
     if (bson_iter_init (&iter, doc) && bson_iter_find (&iter, "passwordHash"))
     {
-        if ( memcmp(password_hash_b64, bson_iter_value(&iter)->value.v_utf8.str,
+        if ( memcmp(l_password_hash_b64, bson_iter_value(&iter)->value.v_utf8.str,
                     DB_AUTH_HASH_LENGTH * 2) == 0 )
             is_correct_password = true;
     }
@@ -455,13 +492,13 @@ bool check_user_password(const char* user, const char* password)
     if(doc)
         bson_destroy(doc);
 
-    free((char*)password_hash); free((char*)password_hash_b64);
+    DAP_DELETE( l_password_hash_b64 );
 
     return is_correct_password;
 }
 
 
-static bool db_auth_save_cookie_inform_in_db(const char* login, char* cookie)
+static bool s_save_cookie_inform_in_db(const char* login, db_auth_info_t * a_auth_info)
 {
     bool result = true;
     mongoc_collection_t *collection = mongoc_client_get_collection (
@@ -484,7 +521,8 @@ static bool db_auth_save_cookie_inform_in_db(const char* login, char* cookie)
     {
         bson_doc = BCON_NEW ("$set", "{",
                              "login", BCON_UTF8 (login),
-                             "cookie", BCON_UTF8 (cookie),
+                             "cookie", BCON_UTF8 (a_auth_info->cookie),
+                             "pkey", BCON_UTF8 (a_auth_info->pkey),
                              "last_use", BCON_DATE_TIME(mktime (utc_date_time) * 1000),
                              "}");
 
@@ -496,7 +534,8 @@ static bool db_auth_save_cookie_inform_in_db(const char* login, char* cookie)
     else
     {
         bson_doc = BCON_NEW("login", BCON_UTF8 (login),
-                            "cookie", BCON_UTF8 (cookie),
+                            "cookie", BCON_UTF8 (a_auth_info->cookie),
+                            "pkey", BCON_UTF8 (a_auth_info->pkey),
                             "last_use", BCON_DATE_TIME(mktime (utc_date_time) * 1000));
 
         if (!mongoc_collection_insert (collection, MONGOC_INSERT_NONE, bson_doc, NULL, &error))
@@ -517,6 +556,46 @@ static bool db_auth_save_cookie_inform_in_db(const char* login, char* cookie)
     return result;
 }
 
+
+/**
+ * @brief dap_server_db_hash_password
+ * @param password
+ * @return
+ */
+unsigned char* dap_server_db_hash_password(const char* a_password)
+{
+    static const unsigned char s_salt[]={ 0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08 };
+    static const size_t s_salt_size=sizeof (s_salt);
+
+    unsigned char *md = DAP_NEW_Z_SIZE(unsigned char, DB_AUTH_HASH_LENGTH * 2);
+
+    size_t a_password_length = strlen(a_password);
+    size_t l_str_length = a_password_length + s_salt_size;
+    unsigned char *l_str = DAP_NEW_Z_SIZE(unsigned char, l_str_length);
+
+    memcpy(l_str, a_password, a_password_length);
+    memcpy(l_str + a_password_length, s_salt, s_salt_size);
+    SHA3_512(md, l_str, l_str_length);
+    SHA3_512(md + DB_AUTH_HASH_LENGTH, s_salt, s_salt_size);
+
+    DAP_DELETE( l_str );
+    return md;
+}
+
+char* dap_server_db_hash_password_b64(const char* a_password)
+{
+    unsigned char* l_hash = dap_server_db_hash_password( a_password);
+    char * l_hash_str = DAP_NEW_Z_SIZE(char, 4 * DB_AUTH_HASH_LENGTH+1 ) ;
+
+    if (!l_hash_str) {
+        DAP_DELETE( (char*)l_hash);
+        log_it(L_ERROR, "Can not memmory allocate");
+        return NULL;
+    }
+
+    dap_enc_base64_encode(l_hash, DB_AUTH_HASH_LENGTH * 2, l_hash_str,DAP_ENC_DATA_TYPE_B64_URLSAFE);
+    return  l_hash_str;
+}
 /**
  * @brief db_auth_login Authorization with user/password
  * @param login ( login = email )
@@ -555,16 +634,7 @@ int db_auth_login(const char* login, const char* password,
 
     bson_iter_t iter;
 
-    char salt[16] = {0}; char salt_from_b64[8]={0};
-    if (bson_iter_init (&iter, doc) && bson_iter_find (&iter, "salt"))
-        memcpy(salt,bson_iter_value(&iter)->value.v_utf8.str,16);
-    else {
-        log_it(L_ERROR, "Not find Salt in user"); return 0;
-    }
-
-    dap_enc_base64_decode(salt, 16, salt_from_b64,DAP_ENC_DATA_TYPE_B64_URLSAFE);
-
-    unsigned const char* password_hash = hash_password(password, salt_from_b64, 8);
+    unsigned const char* password_hash = dap_server_db_hash_password(password);
     if (!password_hash) {
         log_it(L_ERROR, "Can not memmory allocate");
         return 0;
@@ -580,17 +650,16 @@ int db_auth_login(const char* login, const char* password,
 
     dap_enc_base64_encode(password_hash, DB_AUTH_HASH_LENGTH * 2, password_hash_b64,DAP_ENC_DATA_TYPE_B64_URLSAFE);
 
-    if (bson_iter_init (&iter, doc) && bson_iter_find (&iter, "expire_date"))
-    {
+    if (bson_iter_init (&iter, doc) && bson_iter_find (&iter, "expire_date")) {
         if ( bson_iter_date_time(&iter) / 1000 < time(NULL) )
         {
             log_it(L_WARNING, "Subscribe %s has been expiried", login);
             return 4;
         }
-    }
+    }else
+        log_it(L_NOTICE, "Haven't found expire_date in collection");
 
-    if (bson_iter_init (&iter, doc) && bson_iter_find (&iter, "passwordHash"))
-    {
+    if (bson_iter_init (&iter, doc) && bson_iter_find (&iter, "passwordHash")) {
         if ( memcmp(password_hash_b64, bson_iter_value(&iter)->value.v_utf8.str,
                     DB_AUTH_HASH_LENGTH * 2) == 0 )
         {
@@ -611,7 +680,7 @@ int db_auth_login(const char* login, const char* password,
                 if ( mongoc_cursor_next (cursor_dap_domains, (const bson_t**)&doc_dap_domain) == false )
                 {
                     log_it(L_WARNING, "Login Error! "
-                                      "Domain not found in DataBase (collection dap_domains)");
+                                      "Domains not found in DataBase (collection dap_domains)");
 
                     b_error = true;
                 }
@@ -622,8 +691,8 @@ int db_auth_login(const char* login, const char* password,
                     bson_destroy (doc_dap_domain);
                 mongoc_collection_destroy (collection_dap_domain);
 
-                if(b_error)
-                    return 0;
+                //if(b_error)
+                //    return 0;
             }
 
             log_it(L_INFO,"Login accepted");
@@ -666,11 +735,15 @@ int db_auth_login(const char* login, const char* password,
                 (*ai)->cookie[i] = 65 + rand() % 25;
 
             log_it(L_DEBUG,"Store cookie '%s' in the hash table",(*ai)->cookie);
-            db_auth_save_cookie_inform_in_db(login, (*ai)->cookie);
+            s_save_cookie_inform_in_db(login, (*ai));
             pthread_mutex_lock(&mutex_on_auth_hash);
             HASH_ADD_STR(auths,cookie,(*ai));
             pthread_mutex_unlock(&mutex_on_auth_hash);
+        }else{
+            log_it(L_WARNING, "Input password has hash %s but expected to have %s",password_hash_b64, bson_iter_value(&iter)->value.v_utf8.str );
         }
+    }else{
+        log_it(L_WARNING, "No passwordHash in data");
     }
 
     free(password_hash_b64);
@@ -737,36 +810,22 @@ db_auth_info_t * db_auth_register(const char *user,const char *password,
             (mongo_client, l_db_name, "dap_users");
     bson_error_t error;
 
-    char salt[9]={0};
-    dap_random_string_fill(salt, sizeof (salt));
 
-    unsigned const char * password_hash = hash_password(password, salt, 8);
-    char salt_b64[8*2] = {0};
-    dap_enc_base64_encode(salt, 8, salt_b64,DAP_ENC_DATA_TYPE_B64_URLSAFE);
 
-    if (!password_hash) {
+    char * l_password_hash_b64 = dap_server_db_hash_password_b64(password);
+
+    if (!l_password_hash_b64) {
         log_it(L_ERROR, "Can not memmory allocate");
         return NULL;
     }
 
-    unsigned char * password_hash_b64 = calloc(4 * DB_AUTH_HASH_LENGTH, sizeof(char));
-
-    if (!password_hash_b64) {
-        free((char*)password_hash);
-        log_it(L_ERROR, "Can not memmory allocate");
-        return NULL;
-    }
-
-    dap_enc_base64_encode(password_hash, DB_AUTH_HASH_LENGTH * 2, password_hash_b64,DAP_ENC_DATA_TYPE_B64_URLSAFE);
-
-    if (*password_hash_b64 == 0) {
+    if (*l_password_hash_b64 == 0) {
         log_it(L_ERROR, "Bad hash(based64) for user password");
         return NULL;
     }
 
     bson_t *doc = BCON_NEW("login", user,
-                           "passwordHash", password_hash_b64,
-                           "salt",salt_b64,
+                           "passwordHash", l_password_hash_b64,
                            "domainId", BCON_OID((bson_oid_t*)bson_iter_value(&iter)->value.v_oid.bytes),
                            "email", email,
                            "profile",
@@ -775,8 +834,7 @@ db_auth_info_t * db_auth_register(const char *user,const char *password,
                            "last_name", last_name,
                            "}",
                            "contacts" , "[","]");
-    free((char*)password_hash);
-    free(password_hash_b64);
+    free(l_password_hash_b64);
 
     if (!mongoc_collection_insert (collection, MONGOC_INSERT_NONE, doc, NULL, &error)) {
         log_it (L_WARNING, "%s\n", error.message);
@@ -861,19 +919,17 @@ db_auth_info_t * db_auth_register_channel(const char* name_channel, const char* 
             mongoc_client_get_collection (mongo_client, l_db_name, "dap_channels");
     bson_error_t error;
 
-    char salt[9]={0};
-    dap_random_string_fill(salt, sizeof (salt));
-    unsigned const char * password_hash = hash_password(password, salt, 8);
+
+    char * l_password_hash_b64 = dap_server_db_hash_password_b64(password);
 
     bson_t *doc = BCON_NEW("name_channel", name_channel,
-                           "passwordHash", password_hash,
-                           "salt",salt,
+                           "passwordHash", l_password_hash_b64,
                            "domainId", BCON_OID((bson_oid_t*)bson_iter_value(&iter)->value.v_oid.bytes),
                            "subscribers", "[","]",
                            "last_id_message", BCON_INT32(0),
                            "messages","[","]");
 
-    free((char*)password_hash);
+    DAP_DELETE( l_password_hash_b64 );
     if (!mongoc_collection_insert (collection, MONGOC_INSERT_NONE, doc, NULL, &error)) {
         log_it (L_ERROR, "%s\n", error.message);
         bson_destroy(query);
@@ -938,54 +994,58 @@ bool exist_user_in_db(const char* user)
     return exist;
 }
 
+
+
 /**
  * @brief db_auth_http_proc DB Auth http interface
- * @param cl_st HTTP Simple client instance
- * @param arg Pointer to bool with okay status (true if everything is ok, by default)
+ * @param a_delegate HTTP Simple client instance
+ * @param a_arg Pointer to bool with okay status (true if everything is ok, by default)
  */
-void db_auth_http_proc(enc_http_delegate_t *dg, void * arg)
+void db_auth_http_proc(enc_http_delegate_t *a_delegate, void * a_arg)
 {
-    http_status_code_t * return_code = (http_status_code_t*)arg;
+    http_status_code_t * return_code = (http_status_code_t*)a_arg;
 
-    if((dg->request)&&(strcmp(dg->action,"POST")==0)){
-        if(dg->in_query==NULL){
+    if((a_delegate->request)&&(strcmp(a_delegate->action,"POST")==0)){
+        if(a_delegate->in_query==NULL){
             log_it(L_WARNING,"Empty auth action");
             *return_code = Http_Status_BadRequest;
             return;
         }else{
-            if(strcmp(dg->in_query,"logout")==0 ){
-                db_auth_info_t * ai = db_auth_info_by_cookie(dg->cookie);
+            if(strcmp(a_delegate->in_query,"logout")==0 ){
+                db_auth_info_t * ai = db_auth_info_by_cookie(a_delegate->cookie);
                 if(ai){
                     log_it(L_DEBUG, "Cookie from %s user accepted, 0x%032llX session",ai->user,ai->id);
                     pthread_mutex_lock(&mutex_on_auth_hash);
                     HASH_DEL(auths,ai);
                     pthread_mutex_unlock(&mutex_on_auth_hash);
                     free(ai);
-                    enc_http_reply_f(dg,
+                    enc_http_reply_f(a_delegate,
                                      "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n"
                                      "<return>Successfuly logouted</return>\n"
                                      );
                     *return_code = Http_Status_OK;
                 }else{
                     log_it(L_NOTICE,"Logout action: session 0x%032llX is already logouted (by timeout?)",ai->id);
-                    enc_http_reply_f(dg,
+                    enc_http_reply_f(a_delegate,
                                      "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n"
                                      "<err_str>No session in table</err_str>\n"
                                      );
                     *return_code = Http_Status_OK;
                 }
 
-            }else if(strcmp(dg->in_query,"login")==0 ){
-                char user[256];
-                char password[1024];
-                char domain[64];
+            }else if(strcmp(a_delegate->in_query,"login")==0 ){
+                char l_user[256]={0};
+                char l_password[1024]={0};
+                char l_domain[64]={0};
+                char l_pkey[4096]={0};
 
-                if(sscanf(dg->request_str,"%255s %1023s %63s",user,password,domain)==3){
-                    log_it(L_INFO, "Trying to login with username '%s'",user);
+                if(sscanf(a_delegate->request_str,"%255s %1023s %63s %4095s",l_user,l_password,l_domain,l_pkey)>=3){
+                    log_it(L_INFO, "Trying to login with username '%s'",l_user);
 
-                    if(!check_user_data_for_space(strlen(dg->request_str), (strlen(user)+strlen(password)+strlen(domain)))){
+                    if(!check_user_data_for_space(strlen(a_delegate->request_str), (strlen(l_user)+strlen(l_password)+strlen(l_domain)))){
                         log_it(L_WARNING,"Wrong symbols in username or password or domain");
-                        enc_http_reply_f(dg, OP_CODE_INCORRECT_SYMOLS);
+                        log_it(L_DEBUG,"%s@%s %s", l_user,l_pkey);
+                        enc_http_reply_f(a_delegate, OP_CODE_INCORRECT_SYMOLS);
                         *return_code = Http_Status_BadRequest;
                         return;
                     }
@@ -1008,37 +1068,41 @@ void db_auth_http_proc(enc_http_delegate_t *dg, void * arg)
 //                        return;
 //                    }
 
-                    db_auth_info_t * ai = NULL;
-                    short login_result = db_auth_login(user, password, domain, &ai);
+                    db_auth_info_t * l_auth_info = NULL;
+                    short login_result = db_auth_login(l_user, l_password, l_domain, &l_auth_info);
                     switch (login_result) {
                     case 1:
-                        ai->dap_http_client = dg->http;
-                        ai->auth_date = time(NULL);
-                        enc_http_reply_f(dg,
+                        l_auth_info->dap_http_client = a_delegate->http;
+                        l_auth_info->auth_date = time(NULL);
+                        if (l_pkey[0] )
+                            strncpy(l_auth_info->pkey,l_pkey, sizeof (l_auth_info->pkey)-1);
+                        enc_http_reply_f(a_delegate,
                                          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n"
                                          "<auth_info>\n"
                                          );
-                        enc_http_reply_f(dg,"\t<first_name>%s</first_name>\n",ai->first_name);
-                        enc_http_reply_f(dg,"\t<last_name>%s</last_name>\n",ai->last_name);
-                        enc_http_reply_f(dg,"\t<cookie>%s</cookie>\n",ai->cookie);
-                        enc_http_reply_f(dg,"</auth_info>");
-                        log_it(L_INFO, "Login: Successfuly logined user %s",user);
+                        enc_http_reply_f(a_delegate,"\t<first_name>%s</first_name>\n",l_auth_info->first_name);
+                        enc_http_reply_f(a_delegate,"\t<last_name>%s</last_name>\n",l_auth_info->last_name);
+                        enc_http_reply_f(a_delegate,"\t<cookie>%s</cookie>\n",l_auth_info->cookie);
+                        if (s_callback_success)
+                            s_callback_success (a_delegate, l_auth_info); // Here if smbd want to add smth to the output
+                        enc_http_reply_f(a_delegate,"</auth_info>");
+                        log_it(L_INFO, "Login: Successfuly logined user %s",l_user);
                         *return_code = Http_Status_OK;
                         break;
                     case 2:
-                        enc_http_reply_f(dg, OP_CODE_NOT_FOUND_LOGIN_IN_DB);
+                        enc_http_reply_f(a_delegate, OP_CODE_NOT_FOUND_LOGIN_IN_DB);
                         *return_code = Http_Status_OK;
                         break;
                     case 3:
-                        enc_http_reply_f(dg, OP_CODE_LOGIN_INCORRECT_PSWD);
+                        enc_http_reply_f(a_delegate, OP_CODE_LOGIN_INCORRECT_PSWD);
                         *return_code = Http_Status_OK;
                         break;
                     case 4:
-                        enc_http_reply_f(dg, OP_CODE_SUBSCRIBE_EXPIRIED);
+                        enc_http_reply_f(a_delegate, OP_CODE_SUBSCRIBE_EXPIRIED);
                         *return_code = Http_Status_PaymentRequired;
                         break;
                     default:
-                        log_it(L_DEBUG, "Login: wrong password for user %s",user);
+                        log_it(L_DEBUG, "Login: wrong password for user %s",l_user);
                         *return_code = Http_Status_BadRequest;
                         break;
                     }
@@ -1046,7 +1110,7 @@ void db_auth_http_proc(enc_http_delegate_t *dg, void * arg)
                     log_it(L_DEBUG, "Login: wrong auth's request body ");
                     *return_code = Http_Status_BadRequest;
                 }
-            }else if (strcmp(dg->in_query,"register")==0){
+            }else if (strcmp(a_delegate->in_query,"register")==0){
                 char user[256];
                 char password[1024];
                 char domain[64];
@@ -1059,8 +1123,8 @@ void db_auth_http_proc(enc_http_delegate_t *dg, void * arg)
                 char app_version[32];
                 char sys_uuid[128];
 
-                log_it(L_INFO, "Request str = %s", dg->request_str);
-                if(sscanf(dg->request_str,"%255s %63s %1023s %1023s %1023s %1023s %32s %128s"
+                log_it(L_INFO, "Request str = %s", a_delegate->request_str);
+                if(sscanf(a_delegate->request_str,"%255s %63s %1023s %1023s %1023s %1023s %32s %128s"
                           ,user,password,domain,first_name,last_name,email,device_type,app_version)>=7){
                     if(db_input_validation(user)==0){
                         log_it(L_WARNING,"Registration: Wrong symbols in the username '%s'",user);
@@ -1094,18 +1158,18 @@ void db_auth_http_proc(enc_http_delegate_t *dg, void * arg)
                     }
 
                     db_auth_info_t * ai = db_auth_register(user,password,domain,first_name,last_name,email,
-                                                           device_type,app_version,dg->http->client->hostaddr,sys_uuid);
+                                                           device_type,app_version,a_delegate->http->client->hostaddr,sys_uuid);
 
                     if(ai != NULL)
                     {
-                        enc_http_reply_f(dg,
+                        enc_http_reply_f(a_delegate,
                                          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n"
                                          "<auth_info>\n"
                                          );
-                        enc_http_reply_f(dg,"\t<first_name>%s</first_name>\n",ai->first_name);
-                        enc_http_reply_f(dg,"\t<last_name>%s</last_name>\n",ai->last_name);
-                        enc_http_reply_f(dg,"\t<cookie>%s</cookie>\n",ai->cookie);
-                        enc_http_reply_f(dg,"</auth_info>");
+                        enc_http_reply_f(a_delegate,"\t<first_name>%s</first_name>\n",ai->first_name);
+                        enc_http_reply_f(a_delegate,"\t<last_name>%s</last_name>\n",ai->last_name);
+                        enc_http_reply_f(a_delegate,"\t<cookie>%s</cookie>\n",ai->cookie);
+                        enc_http_reply_f(a_delegate,"</auth_info>");
 
                         log_it(L_NOTICE,"Registration: new user %s \"%s %s\"<%s> is registred",user,first_name,last_name,email);
                     }
@@ -1117,12 +1181,12 @@ void db_auth_http_proc(enc_http_delegate_t *dg, void * arg)
                     *return_code = Http_Status_BadRequest;
                 }
             }else{
-                log_it(L_ERROR, "Unknown auth command was selected (query_string='%s')",dg->in_query);
+                log_it(L_ERROR, "Unknown auth command was selected (query_string='%s')",a_delegate->in_query);
                 *return_code = Http_Status_BadRequest;
             }
         }
     }else{
-        log_it(L_ERROR, "Wrong auth request action '%s'",dg->action);
+        log_it(L_ERROR, "Wrong auth request action '%s'",a_delegate->action);
         *return_code = Http_Status_BadRequest;
     }
 }
@@ -1170,21 +1234,7 @@ static bool mongod_is_running()
     return true;
 }
 
-inline static unsigned char* hash_password(const unsigned char* password, unsigned char* salt, size_t salt_size)
-{
-    unsigned char *md = (unsigned char*) malloc (DB_AUTH_HASH_LENGTH * 2);
 
-    size_t len_pswd = strlen(password);
-    size_t length_str = len_pswd + salt_size;
-    char str[length_str];
-
-    memcpy(str, password, len_pswd);
-    memcpy(str + len_pswd, salt, salt_size);
-    SHA3_512(md, str, length_str);
-    SHA3_512(md + DB_AUTH_HASH_LENGTH, salt, salt_size);
-
-    return md;
-}
 
 /// Check user data for correct input.
 /// @param before_parsing Line size before parsing.

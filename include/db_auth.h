@@ -36,6 +36,7 @@ typedef struct db_auth_info{
     char email[1024];
     char user[256];
     char password[1024];
+    char pkey[4096];
     time_t auth_date;
 
     /* pointer on low-level client only for read! */
@@ -47,6 +48,7 @@ typedef struct db_auth_info{
 int db_auth_init(const char* db_name);
 void db_auth_deinit(void);
 
+void db_auth_set_callbacks(dap_enc_http_callback_t a_callback_success);
 
 db_auth_info_t* db_auth_info_by_cookie(const char * cookie);
 db_auth_info_t* db_search_cookie_in_db(const char * cookie);
@@ -70,6 +72,9 @@ bool db_auth_change_password(const char *user, const char* new_password);
 
 bool check_user_password(const char* user, const char* password);
 
+unsigned char* dap_server_db_hash_password(const char* a_password);
+char* dap_server_db_hash_password_b64(const char* a_password);
+
 void db_auth_http_proc(enc_http_delegate_t *dg, void * arg);
 
 void db_auth_traffic_track_callback(dap_server_t *srv);
@@ -80,3 +85,5 @@ void db_auth_traffic_track_callback(dap_server_t *srv);
 /// @return Returns true if user data is entered correctly
 /// (there are 2 separator spaces), otherwise false.
 inline bool check_user_data_for_space(size_t before_parsing, size_t after_parsing);
+
+bool db_auth_set_field_str(const char* a_user, const char* a_field_name, const char * a_field_value);
