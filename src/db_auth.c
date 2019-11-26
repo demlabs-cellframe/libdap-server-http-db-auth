@@ -39,7 +39,6 @@
 #include "db_core.h"
 #include "db_auth.h"
 #include "http_status_code.h"
-#include <mongoc.h>
 
 #include "SimpleFIPS202.h"
 
