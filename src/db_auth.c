@@ -1038,13 +1038,18 @@ void db_auth_http_proc(enc_http_delegate_t *a_delegate, void * a_arg)
                 char l_password[1024]={0};
                 char l_domain[64]={0};
                 char l_pkey[4096]={0};
+                char l_something[64] = {0};
 
-                if(sscanf(a_delegate->request_str,"%255s %1023s %63s %4095s",l_user,l_password,l_domain,l_pkey)>=3){
+                if(sscanf(a_delegate->request_str,"%255s %1023s %63s %4095s %64s",l_user,l_password,l_domain,l_pkey,l_something)>=3){
                     log_it(L_INFO, "Trying to login with username '%s'",l_user);
 
-                    if(!check_user_data_for_space(strlen(a_delegate->request_str), (strlen(l_user)+strlen(l_password)+strlen(l_domain)))){
-                        log_it(L_WARNING,"Wrong symbols in username or password or domain");
-                        log_it(L_DEBUG,"%s@%s %s", l_user,l_pkey);
+                    if(!check_user_data_for_space(strlen(a_delegate->request_str), strlen(l_user) + strlen(l_password) + strlen(l_domain) + strlen(l_pkey) + strlen(l_something))){
+                        log_it(L_WARNING,"Wrong symbols in username or password or domain, misfit is %d", strlen(a_delegate->request_str) - strlen(l_user) - strlen(l_password) - strlen(l_domain) - strlen(l_pkey) - strlen(l_something));
+                        //log_it(L_WARNING, "l_user size: %d", strlen(l_user));
+                        //log_it(L_WARNING, "l_pass size: %d", strlen(l_password));
+                        //log_it(L_WARNING, "l_pkey size: %d", strlen(l_pkey));
+                        log_it(L_DEBUG,"%s@%s", l_user, l_password);
+
                         enc_http_reply_f(a_delegate, OP_CODE_INCORRECT_SYMOLS);
                         *return_code = Http_Status_BadRequest;
                         return;
@@ -1243,5 +1248,5 @@ static bool mongod_is_running()
 /// (there are 2 separator spaces), otherwise false.
 bool check_user_data_for_space(size_t before_parsing, size_t after_parsing)
 {
-    return (before_parsing - after_parsing) == 2;
+    return (before_parsing - after_parsing) == 3;
 }
