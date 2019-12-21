@@ -30,12 +30,11 @@
 //#include "dap_client.h"
 #include "dap_common.h"
 #include "dap_config.h"
+#include "dap_strfuncs.h"
 
 #ifdef _WIN32
 #include "registry.h"
 #endif
-
-#include "dap_defines.h"
 
 #include "db_auth.h"
 
@@ -49,22 +48,27 @@ static void s_help(const char * a_app_name)
 
 int main(int argc, const char * argv[])
 {
-#ifdef _WIN32
-    dap_sprintf(s_sys_dir_path, "%s/%s", regGetUsrPath(), DAP_APP_NAME);
-    l_sys_dir_path_len = strlen(s_sys_dir_path);
-#endif
 
     //    set_default_locale();
     //    command_execution_string = shell_script_filename = (char *) NULL;
+    dap_set_appname("http_db_auth_tool");
+#ifdef DAP_OS_LINUX
+    g_sys_dir_path = dap_strdup_printf("/opt/%s",dap_get_appname() );
+#elif _WIN32
+    dap_sprintf(s_sys_dir_path, "%s/%s", regGetUsrPath(), dap_get_appname() );
+#endif
+    g_sys_dir_path_len = strlen(g_sys_dir_path);
 
-    memcpy(s_sys_dir_path + l_sys_dir_path_len, SYSTEM_CONFIGS_DIR, sizeof(SYSTEM_CONFIGS_DIR) );
-    dap_common_init( DAP_APP_NAME " Console interface", NULL );
+    char * l_app_title = dap_strdup_printf("%s console interface",dap_get_appname());
+
+    char * l_config_path = dap_strdup_printf("%s/etc", g_sys_dir_path);
+
+    dap_common_init( l_app_title, NULL );
     dap_log_level_set( L_CRITICAL );
-    dap_config_init( s_sys_dir_path );
-    memset(s_sys_dir_path + l_sys_dir_path_len, '\0', MAX_PATH - l_sys_dir_path_len);
+    dap_config_init( g_sys_dir_path );
 
-    if((g_config = dap_config_open(DAP_APP_NAME)) == NULL) {
-        printf("Can't init general configurations " DAP_APP_NAME ".cfg\n");
+    if((g_config = dap_config_open(dap_get_appname())) == NULL) {
+        printf("Can't init general configurations %s.cfg\n",dap_get_appname());
         exit(-1);
     }
 
