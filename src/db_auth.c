@@ -698,8 +698,8 @@ int db_auth_login(const char* login, const char* password,
             log_it(L_INFO,"Login accepted");
 
             *ai = DAP_NEW_Z(db_auth_info_t);
-            strncpy((*ai)->user,login,sizeof((*ai)->user));
-            strncpy((*ai)->password,password,sizeof((*ai)->password));
+            strncpy((*ai)->user,login,sizeof((*ai)->user)-1);
+            strncpy((*ai)->password,password,sizeof((*ai)->password)-1);
 
             if ( !bson_iter_init (&iter, doc) )
                 log_it(L_ERROR,"Error iter init");
@@ -719,17 +719,17 @@ int db_auth_login(const char* login, const char* password,
             if (bson_iter_init (&iter, doc) &&
                     bson_iter_find_descendant (&iter, "profile.first_name", &sub_iter))
                 strncpy((*ai)->first_name,bson_iter_value(&sub_iter)->value.v_utf8.str,
-                        sizeof((*ai)->first_name));
+                        sizeof((*ai)->first_name)-1);
 
             if (bson_iter_init (&iter, doc) &&
                     bson_iter_find_descendant (&iter, "profile.last_name", &sub_iter))
                 strncpy((*ai)->last_name,bson_iter_value(&sub_iter)->value.v_utf8.str,
-                        sizeof((*ai)->last_name));
+                        sizeof((*ai)->last_name)-1);
 
             if (bson_iter_init (&iter, doc) &&
                     bson_iter_find_descendant (&iter, "profile.email", &sub_iter))
                 strncpy((*ai)->email,bson_iter_value(&sub_iter)->value.v_utf8.str,
-                        sizeof((*ai)->email));
+                        sizeof((*ai)->email)-1);
 
             for(int i=0; i < sizeof((*ai)->cookie); i++)
                 (*ai)->cookie[i] = 65 + rand() % 25;
@@ -851,11 +851,11 @@ db_auth_info_t * db_auth_register(const char *user,const char *password,
     else
     {
         db_auth_info_t * ai = DAP_NEW_Z(db_auth_info_t);
-        strncpy(ai->user,user,sizeof(ai->user));
-        strncpy(ai->password,password,sizeof(ai->password));
-        strncpy(ai->last_name,last_name,sizeof(ai->last_name));
-        strncpy(ai->first_name,first_name,sizeof(ai->first_name));
-        strncpy(ai->email,email,sizeof(ai->email));
+        strncpy(ai->user,user,sizeof(ai->user)-1);
+        strncpy(ai->password,password,sizeof(ai->password)-1);
+        strncpy(ai->last_name,last_name,sizeof(ai->last_name)-1);
+        strncpy(ai->first_name,first_name,sizeof(ai->first_name)-1);
+        strncpy(ai->email,email,sizeof(ai->email)-1);
 
         for(int i=0;i<sizeof(ai->cookie);i++)
             ai->cookie[i]=65+rand()%25;
@@ -943,10 +943,10 @@ db_auth_info_t * db_auth_register_channel(const char* name_channel, const char* 
     }
 
     db_auth_info_t * ai = DAP_NEW_Z(db_auth_info_t);
-    strncpy(ai->user,name_channel,sizeof(ai->user));
-    strncpy(ai->password,password,sizeof(ai->password));
+    strncpy(ai->user,name_channel,sizeof(ai->user)-1);
+    strncpy(ai->password,password,sizeof(ai->password)-1);
 
-    for(int i=0;i<sizeof(ai->cookie);i++)
+    for(size_t i=0;i<sizeof(ai->cookie);i++)
         ai->cookie[i]=65+rand()%25;
 
     pthread_mutex_lock(&mutex_on_auth_hash);
