@@ -57,7 +57,7 @@ int main(int argc, const char * argv[])
 #elif _WIN32
     dap_sprintf(s_sys_dir_path, "%s/%s", regGetUsrPath(), dap_get_appname() );
 #endif
-    g_sys_dir_path_len = strlen(g_sys_dir_path);
+    size_t g_sys_dir_path_len = strlen(g_sys_dir_path);
 
     char * l_app_title = dap_strdup_printf("%s console interface",dap_get_appname());
 
