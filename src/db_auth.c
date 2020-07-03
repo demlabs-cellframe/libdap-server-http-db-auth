@@ -467,7 +467,26 @@ bool check_user_password(const char* a_user, const char* a_password)
 
     dap_enc_base64_decode(salt, 16, salt_from_b64,DAP_ENC_DATA_TYPE_B64);
 
-    char*  l_password_hash_b64 = dap_server_db_hash_password_b64(a_password);
+    //--- TEMP ---
+    unsigned char *md = DAP_NEW_Z_SIZE(unsigned char, DB_AUTH_HASH_LENGTH * 2);
+
+    size_t a_password_length = strlen(a_password);
+    size_t l_str_length = a_password_length + 8;
+    unsigned char *l_str = DAP_NEW_Z_SIZE(unsigned char, l_str_length);
+
+    memcpy(l_str, a_password, a_password_length);
+    memcpy(l_str + a_password_length, salt_from_b64, 8);
+    SHA3_512(md, l_str, l_str_length);
+
+    char * l_password_hash_b64 = DAP_NEW_Z_SIZE(char, 4 * DB_AUTH_HASH_LENGTH+1 ) ;
+
+    dap_enc_base64_encode(l_str, DB_AUTH_HASH_LENGTH * 2, l_password_hash_b64,DAP_ENC_DATA_TYPE_B64_URLSAFE);
+
+
+    DAP_DELETE( l_str );
+    //------------
+
+    //char*  l_password_hash_b64 = dap_server_db_hash_password_b64(a_password);
 
     if (!l_password_hash_b64) {
         log_it(L_ERROR, "Can not memmory allocate");
